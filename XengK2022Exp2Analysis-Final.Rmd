@@ -1,0 +1,1073 @@
+---
+title: "XengK2022Analysis"
+author: "Carly Muletz Wolz"
+date: "2/15/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r load data, message=F, warning = F}
+##    Grayfer Lab Xenopus Mast cell enrichment + Bd Study 2022  Data Analysis   ###
+
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#
+#BiocManager::install("phyloseq")
+
+## Load packages
+library(phyloseq)
+library(ape)
+library(vegan)
+library(ggplot2)
+library(pairwiseAdonis)
+
+
+
+##Set working directory to bring in files##
+#setwd("/Users/lkgentry/OneDrive - Smithsonian Institution/GrayferLabExperiments/KelseyAnalysisNov2022/FinalRFilesCombinedRun/")
+
+setwd("/Users/Carly/OneDrive - Smithsonian Institution/NSF-BBSRC2022/GrayferLabExperiments/KelseyAnalysisNov2022/FinalRFilesCombinedRun/")
+
+featureTab <- otu_table(read.csv("XENGK2022EXP2_feature_tableFINAL_run2.csv", header = T, row.names = 1), taxa_are_rows = TRUE)
+
+
+## 1645 taxa by 55 samples
+dim(featureTab)
+
+# Read taxonomy info in, make matrix and compatible for phyloseq
+taxonomy <- tax_table(as.matrix(read.csv("XENGK2022EXP2_taxonomy_run2.csv", row.names = 1)))
+
+
+meta_data <- sample_data(read.csv("XENGK2022EXP2_meta_FINAL_run2-anti.csv", header = T, row.names = 1))
+
+## SampleID is now row.names, still useful to have SampleID in metadata so add in
+
+meta_data$SampleID <- row.names(meta_data)
+
+# Read in sequence data, may need if you want to look at or subset the DNA sequences at some point
+library(Biostrings)
+seqs <- readDNAStringSet("XENGK2022EXP2_DNAsequences_run2.fasta")
+
+# Merge it all together
+
+xk7 <- merge_phyloseq(featureTab, taxonomy, meta_data) #seqs) #tree)
+
+xk7
+
+
+## drop low coverage samples
+#dropped sample that only had 1710 sequences
+
+## filtered 
+
+xk7 <- prune_samples(sample_sums(xk7)>2000, xk7)
+
+dfxk <- as(sample_data(xk7), "data.frame")
+
+str(dfxk) 
+
+## Thought filtered out all cyanobacteria, but need to do so here
+## We filtered class = chloroplast, but also need to do this in the future
+ntaxa(subset_taxa(xk7, Phylum == "Cyanobacteria"))
+
+xk7 <- subset_taxa(xk7, Phylum != "Cyanobacteria")
+
+## Come back to make factors in phyloseq object
+dfxk$Treatment <- as.factor(dfxk$Treatment)
+
+dfxk$TimePoint <- as.factor(dfxk$TimePoint)
+
+dfxk$TrmtTimePoint <- as.factor(dfxk$TrmtTimePoint)
+
+dfxk$Bd <- as.factor(dfxk$Bd)
+
+#After running code 68-160 don't need to run again. Just needed to rerun with -anti file
+
+```
+
+
+### Final coverage, sample size and sequence counts
+```{r, message=F, warning = F, eval = F}
+
+## Exclude prior samples
+
+"%ni%" <- Negate("%in%")
+
+xk7 <- xk7 %>% subset_samples((TimePoint %ni% c("Prior")))
+
+## OK, true final coverage difference = 11.2x
+
+sort(sample_sums(xk7))
+
+max(sample_sums(xk7))/min(sample_sums(xk7))
+
+mean(sample_sums(xk7))
+
+## FINAL sequence counts = high quality 515,967 sequences
+
+sum(sample_sums(xk7))
+
+library(plyr)
+
+## Info on sample sizes 
+info <- ddply(dfxk , .(TrmtTimePoint), summarize, sample_size=length(TrmtTimePoint))
+info
+
+```
+
+
+```{r antiBd mapping, eval = F}
+
+# pleth and woodhams, matched at 100%  in Geneious
+#Carly is getting me this 
+my_antiBd <- read.csv("blast-WoodhamsStrictXengK2022run2.csv", header = T, stringsAsFactors = F)
+
+
+str(my_antiBd$X..Pairwise.Identity)
+
+my_antiBd <- my_antiBd[my_antiBd$X..Pairwise.Identity > 0.999,]
+
+my_antiBd$X..Pairwise.Identity
+my_antiBd <- my_antiBd[,1]
+str(my_antiBd)
+
+
+## Need an ASV ID in the taxonomy table to match to
+tax_table(xk7) <- cbind(tax_table(xk7), ASV=taxa_names(xk7))
+
+xk7Anti <-  subset_taxa(xk7, ASV %in% my_antiBd)
+
+## Add estimated anti-Bd bac richness to metadata, will be there next time, no need to repeat
+
+### NO NEED TO RUN 
+
+dfxk7A <- as(sample_data(xk7Anti), "data.frame")
+
+t_otu <-t(as(otu_table(xk7Anti), "matrix"))
+
+library(vegan)
+AD <- estimateR(t_otu)
+AD <- t(as.data.frame(AD))
+
+## Add sequence coverage info
+seqs <- as.data.frame(sample_sums(xk7Anti))
+seqs$SampleID <- row.names(seqs)
+
+
+#now merge to get sequence counts and alpha estimates in mapping file
+alpha_df <- merge(dfxk7A, AD,  by = "row.names")
+alpha_df$SampleID <- alpha_df$Row.names
+
+alpha_df <- merge(alpha_df, seqs, by = "SampleID")
+row.names(alpha_df) <- alpha_df$Row.names
+#warning that row.names is duplicated in the results. unsure why
+
+## Now add a column to divide sequenc counts anti-Bd bac by total sequence counts, doing so manually = lazy haha
+#name column AntiBdRA
+
+# Changing to s.obs.anti for the counts of anti-Bd bacteria
+
+#write.csv(alpha_df, "XENGK2022EXP2_meta_FINAL_run2-anti.csv", row.names = F)
+
+
+
+
+```
+
+
+###rarefaction plots for coverage
+
+
+```{r rarefaction, eval = F}
+## Load packages
+
+library("ranacapa")
+
+p <- ggrare(xk7, step = 100, color = "Treatment", se = FALSE)
+
+## NOTE: change the xlim based on your data or ability to see lower sequence numbers
+p + theme_bw() + theme_classic() + xlab("Sequence count") + ylab("Bacterial ASV richness") +
+  theme(text = element_text(size = 15)) + labs(color='Sample type') +xlim(0,10000) 
+
+
+## Beautiful!
+## Coverage looks great
+
+```
+
+### Basic description of micrbiome
+
+```{description}
+library(dplyr)
+
+xk7
+
+## only bacteria, no archaea
+get_taxa_unique(xk7, "Kingdom")
+
+get_taxa_unique(xk7, "Phylum")
+
+str(xk7)
+
+sample_data(xk7)
+str(sample_data(xk7))
+str(sample_data(xk7)$Treatment)
+
+xk7
+
+
+### Look at some relative abundance plots, Filter out less than 5%
+ps.phylum <- xk7 %>%
+  tax_glom(taxrank = "Phylum") %>%   # agglomerate at phylum level
+  merge_samples("TrmtTimePoint")  %>%
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%    
+  filter(Abundance > 0.05) %>% 
+  arrange(Phylum)                                      # Sort data frame alphabetically 
+
+## LEAVE x = Sample. In melting the factor you merge samples with is then called 'Sample'
+
+p_RA <- ggplot(data=ps.phylum, aes(x=Sample, y=Abundance, fill=Phylum))
+
+cbPalette <- c("mediumpurple", "#999999", "#CC79A7", "#56B4E9", "#009E73", "aquamarine2", "#F0E442","#0072B2","#E69F00","#D55E00" , "gray44", "darkolivegreen1")
+
+p_RA + geom_bar(aes(), stat="identity", position="stack")  + 
+  ylab("Relative abundance (% of sequences)") +theme_classic()  + theme_bw()  +
+  theme_classic()+ labs(x = "")+ theme(text = element_text(size = 16))+
+  scale_x_discrete(guide = guide_axis(angle = 30))+ scale_fill_manual(values=cbPalette,name="Phylum")
+
+
+
+#### Top Phyla ####
+
+100 *sum(taxa_sums(subset_taxa(xk7, Phylum == "Proteobacteria")))/sum(taxa_sums(xk7))
+
+ntaxa(subset_taxa(xk7, Phylum == "Proteobacteria"))
+
+
+100 *sum(taxa_sums(subset_taxa(xk7, Phylum == "Firmicutes")))/sum(taxa_sums(xk7))
+
+ntaxa(subset_taxa(xk7, Phylum == "Firmicutes"))
+
+
+100 *sum(taxa_sums(subset_taxa(xk7, Phylum == "Actinobacteriota")))/sum(taxa_sums(xk7))
+
+ntaxa(subset_taxa(xk7, Phylum == "Actinobacteriota"))
+
+
+100 *sum(taxa_sums(subset_taxa(xk7, Phylum == "Bacteroidota")))/sum(taxa_sums(xk7))
+
+ntaxa(subset_taxa(xk7, Phylum == "Bacteroidota"))
+
+100 *sum(taxa_sums(subset_taxa(xk7, Phylum == "Verrucomicrobiota")))/sum(taxa_sums(xk7))
+
+ntaxa(subset_taxa(xk7, Phylum == "Verrucomicrobiota"))
+
+100 *sum(taxa_sums(subset_taxa(xk7, Phylum == "Bdellovibrionota")))/sum(taxa_sums(xk7))
+
+ntaxa(subset_taxa(xk7, Phylum == "Bdellovibrionota"))
+
+100 *sum(taxa_sums(subset_taxa(xk7, Phylum == "Acidobacteriota")))/sum(taxa_sums(xk7))
+
+ntaxa(subset_taxa(xk7, Phylum == "Acidobacteriota"))
+
+
+
+ps.genus <- xk7 %>%
+  tax_glom(taxrank = "Genus") %>%   # agglomerate at phylum level
+  merge_samples("TrmtTimePoint")  %>%
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%    
+  filter(Abundance > 0.05) %>% 
+  arrange(Genus)                                      # Sort data frame alphabetically 
+
+## LEAVE x = Sample. In melting the factor you merge samples with is then called 'Sample'
+
+p_RA2 <- ggplot(data=ps.genus, aes(x=Sample, y=Abundance, fill=Genus))
+
+cbPalette <- c("mediumpurple", "#999999", "#CC79A7", "#56B4E9", "#009E73", "aquamarine2", "#F0E442","#0072B2","#E69F00","#D55E00" , "gray44", "darkolivegreen1")
+
+p_RA2 + geom_bar(aes(), stat="identity", position="stack")  + 
+  ylab("Relative abundance (% of sequences)") +theme_classic()  + theme_bw()  +
+  theme_classic()+ labs(x = "")+ theme(text = element_text(size = 16))+
+  scale_x_discrete(guide = guide_axis(angle = 30))
+
+
+
+All.core = filter_taxa(xk7, function(x) sum(x > 1) > (0.8*length(x)), TRUE)
+All.core = filter_taxa(All.core, function(x) sum(x) !=0, TRUE)
+
+All.core@tax_table
+
+
+xk7C <- xk7 %>% subset_samples((Treatment %in% c("Control")))
+
+
+All.coreC = filter_taxa(xk7C, function(x) sum(x > 1) > (0.9*length(x)), TRUE)
+ 
+All.coreC = filter_taxa(All.coreC, function(x) sum(x) !=0, TRUE)
+
+All.coreC@tax_table
+
+```
+
+
+
+
+### NOW 10 days in new experiment (didn't update to call 10, is called 12 from 1st experiment)
+
+```{r alpha beta H12}
+
+
+xk12 <- subset_samples(xk7, TimePoint == "10d")
+df12 <- as(sample_data(xk12), "data.frame")
+
+df12$Treatment <- as.factor(df12$Treatment)
+df12$TimePoint <- as.factor(df12$TimePoint)
+
+df12$TrmtTimePoint <- as.factor(df12$TrmtTimePoint)
+
+df12$Bd <- as.factor(df12$Bd)
+
+
+
+## Need this for beta diversity only
+xk12A <- subset_samples(xk7Anti, TimePoint == "10d")
+df12A <- as(sample_data(xk12A), "data.frame")
+
+xk12A <- filter_taxa(xk12A, function(x) sum(x) !=0, TRUE) #11,344 taxa
+
+xk12A
+
+
+
+
+
+## Histo is not normally distributed
+hist(log10(df12$S.obs.x))
+hist(log10(df12$S.obs.anti+1))
+hist(log10(df12$AntiBdRA+1))
+
+## p value is below 0.05, so data is normally distributed
+shapiro.test(log10(df12$S.obs.x)) #p=0.04091
+shapiro.test(log10(df12$S.obs.anti+1)) #p=0.01795
+shapiro.test(log10(df12$AntiBdRA+1)) #p=0.00432
+
+library(car)
+## testing for homogeneity of variance
+## p value is above 0.05, so data similar variances
+leveneTest(log10(df12$S.obs.x)~df12$TrmtTimePoint)
+leveneTest(log10(df12$S.obs.anti+1)~df12$TrmtTimePoint)
+leveneTest(log10(df12$AntiBdRA+1)~df12$TrmtTimePoint)
+
+str(df12$TrmtTimePoint)
+
+## OVerall species richness, the interaction term is the correct model to run
+## good for ANOVA
+modeAlpha12 <- aov(log10(S.obs.x)~TrmtTimePoint, data=df12)
+modeAlpha12 <- aov(log10(S.obs.x)~MastCell*Bd, data=df12)
+
+summary(modeAlpha12)
+
+levels(df12$TrmtTimePoint)
+
+ggplot(data = df12, aes(x=Treatment, y=S.obs.x))+geom_boxplot()+theme_bw()+theme_classic()+
+  theme(text = element_text(size = 18)) + ylab("Bacterial ASV richness") + xlab("")+ theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 18))
+
+
+## Bacterial richness similar at day 10 
+TukeyHSD(modeAlpha12)
+
+### Anti-Bd species richness, not significant at day 10
+modeAlpha12ab <- aov(log10(S.obs.anti+1)~TrmtTimePoint, data=df12)
+modeAlpha12ab <- aov(log10(S.obs.anti+1)~MastCell*Bd, data=df12)
+summary(modeAlpha12ab)
+
+ggplot(data = df12, aes(x=Treatment, y=S.obs.anti))+geom_boxplot()+theme_bw()+theme_classic()+
+  theme(text = element_text(size = 18)) + ylab("Bd-inhibitory bacterial richness") + xlab("")+ theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 18))
+
+## Relative abundance anti-Bd
+modeAlpha12abr <- aov(log10(AntiBdRA+1)~TrmtTimePoint, data=df12)
+modeAlpha12abr <- aov(log10(AntiBdRA+1)~MastCell*Bd, data=df12)
+summary(modeAlpha12abr)
+
+
+ggplot(data = df12, aes(x=Treatment, y=AntiBdRA))+geom_boxplot()+theme_bw()+theme_classic()+
+  theme(text = element_text(size = 17)) + ylab("Bd-inhibitory ASV relative abundance") + xlab("")+ theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 18))
+
+
+
+otu12A <- t(as(otu_table(xk12A), "matrix"))
+
+#heatmap stuff
+ph_sub <- plot_heatmap(xk12A, distance = "euclidean", sample.label="Treatment", 
+                       taxa.label = "ASV", high = "red", low = "yellow", 
+                       na.value = "darkgray", sample.order = "Treatment", taxa.order = "ASV")
+
+ph_sub + facet_grid(~Treatment, scales = "free_x")
+
+##
+
+antiData <- merge(otu12A, df12A, by = "row.names")
+
+##25 anti-Bd bacterial OTUs
+OTUs_D <- data.frame(antiData[,2:26], row.names = antiData[,1], Treatment = antiData[,30])
+OTUs_D
+
+library(reshape)
+d <- melt(OTUs_D, id.vars = "Treatment")
+
+d$Treatment <- factor(d$Treatment, levels = c("Control", "MastCell", "Control+Bd", "MastCell+Bd"))
+
+# Separate plots
+ggplot(d, aes(Treatment,log10(value+1))) + 
+  geom_boxplot() + ylab("normailzed sequence count") +
+  facet_wrap(~variable, scales = "free")
+
+
+
+OTUs_D <- data.frame(antiData[,2:26], row.names = antiData[,1], Treatment = antiData[,30], MastCell = antiData[,34], Bd = antiData[,33])
+
+#Bd effect, not mast cell effect
+asv21 <- aov(log(x = ASV21+1) ~ Treatment, data = OTUs_D)
+asv21 <- aov(log(ASV21+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv21)
+TukeyHSD(asv21)
+
+summary(aov(log(ASV37+1) ~ Treatment, data = OTUs_D))
+summary(aov(log(ASV41+1) ~ Treatment, data = OTUs_D))
+summary(aov(log(ASV48+1) ~ Treatment, data = OTUs_D))
+summary(aov(log(ASV55+1) ~ Treatment, data = OTUs_D))
+summary(aov(log(ASV72+1) ~ Treatment, data = OTUs_D))
+summary(aov(log(ASV99+1) ~ Treatment, data = OTUs_D))
+summary(aov(log(ASV135+1) ~ Treatment, data = OTUs_D)) #not sig
+summary(aov(log(ASV179+1) ~ Treatment, data = OTUs_D))
+summary(aov(log(ASV299+1) ~ Treatment, data = OTUs_D)) #not sig
+summary(aov(log(ASV319+1) ~ Treatment, data = OTUs_D))
+summary(aov(log(ASV356+1) ~ Treatment, data = OTUs_D)) #not sig
+summary(aov(log(ASV425+1) ~ Treatment, data = OTUs_D)) #not sig
+summary(aov(log(ASV496+1) ~ Treatment, data = OTUs_D)) #not sig
+summary(aov(log(ASV672+1) ~ Treatment, data = OTUs_D))
+summary(aov(log(ASV1423+1) ~ Treatment, data = OTUs_D))#not sig
+
+### Sig difference between control vs bd treatment, bd effect
+asv37 <- aov(log(ASV37+1) ~ Treatment, data = OTUs_D)
+asv37 <- aov(log(ASV37+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv37)
+TukeyHSD(asv37)
+
+#Bd and mast cell effect
+asv41 <- aov(log(ASV41+1) ~ Treatment, data = OTUs_D)
+asv41 <- aov(log(ASV41+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv41)
+TukeyHSD(asv41)
+
+#Mastcell and bd effect
+asv48 <- aov(log(ASV48+1) ~ Treatment, data = OTUs_D)
+asv48 <- aov(log(ASV48+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv48)
+TukeyHSD(asv48)
+
+#Bd effect
+asv55 <- aov(log(ASV55+1) ~ Treatment, data = OTUs_D)
+asv55 <- aov(log(ASV55+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv55)
+TukeyHSD(asv55)
+
+#Bd effect
+asv72 <- aov(log(ASV72+1) ~ Treatment, data = OTUs_D)
+asv72 <- aov(log(ASV72+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv72)
+TukeyHSD(asv72)
+
+#Mast cell effect
+asv99 <- aov(log(ASV99+1) ~ Treatment, data = OTUs_D)
+asv99 <- aov(log(ASV99+1) ~ MastCell*Bd, data = OTUs_D) 
+summary(asv99)
+TukeyHSD(asv99)
+
+#MastCell and Bd?
+asv179 <- aov(log(ASV179+1) ~ Treatment, data = OTUs_D)
+asv179 <- aov(log(ASV179+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv179)
+TukeyHSD(asv179)
+
+#Bd effect
+asv319 <- aov(log(ASV319+1) ~ Treatment, data = OTUs_D)
+asv319 <- aov(log(ASV319+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv319)
+TukeyHSD(asv319)
+
+#Mast Cell and Bd effect
+asv672 <- aov(log(ASV672+1) ~ Treatment, data = OTUs_D)
+asv672 <- aov(log(ASV672+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv672)
+TukeyHSD(asv672)
+
+
+###did not do anything with chunk below
+
+summary(aov(log(ASV21+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV51+1) ~ MastCell*Bd, data = OTUs_D))
+
+summary(aov(log(ASV105+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV113+1) ~ MastCell*Bd, data = OTUs_D))
+asv136 <- aov(log(ASV136+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv136)
+summary(aov(log(ASV150+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV164+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV171+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV183+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV238+1) ~ MastCell*Bd, data = OTUs_D))
+
+asv346 <- aov(log(ASV346+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv346)
+summary(aov(log(ASV587+1) ~ MastCell*Bd, data = OTUs_D))
+
+#Did not do anything with chunk above
+
+str(OTUs_D)
+
+plot(log(ASV21+1) ~ as.factor(Treatment), data = OTUs_D)
+plot(log(ASV37+1) ~ as.factor(Treatment), data = OTUs_D)
+plot(log(ASV41+1) ~ as.factor(Treatment), data = OTUs_D)
+plot(log(ASV48+1) ~ as.factor(Treatment), data = OTUs_D)
+plot(log(ASV55+1) ~ as.factor(Treatment), data = OTUs_D)
+plot(log(ASV72+1) ~ as.factor(Treatment), data = OTUs_D)
+plot(log(ASV99+1) ~ as.factor(Treatment), data = OTUs_D)
+plot(log(ASV179+1) ~ as.factor(Treatment), data = OTUs_D)
+plot(log(ASV319+1) ~ as.factor(Treatment), data = OTUs_D)
+plot(log(ASV672+1) ~ as.factor(Treatment), data = OTUs_D)
+
+
+jacc_xk <- phyloseq::distance(xk12, "jaccard", binary = T)
+jacc.ord <- ordinate(xk12, method = "PCoA", jacc_xk)
+
+p_jacc <- plot_ordination(xk12, jacc.ord, color = "TrmtTimePoint", shape = "Bd")
+p_jacc + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 18))+ stat_ellipse(aes(group=TrmtTimePoint), linetype = 5, level = 0.8)
+
+
+
+
+### STATS
+library(vegan)
+jacc_adonis1 <- adonis2(jacc_xk ~ TrmtTimePoint, data = df12)
+jacc_adonis1 <- adonis2(jacc_xk ~ MastCell*Bd, data = df12)
+jacc_adonis1
+
+
+library(pairwiseAdonis)
+
+## The effect of mast cells depends on Bd infection status
+pairwise.adonis(jacc_xk, df12$TrmtTimePoint)
+pairwise.adonis(jacc_xk, df12$MastCell)
+pairwise.adonis(jacc_xk, df12$Bd)
+
+
+p_jacc <- plot_ordination(xk12, jacc.ord, color = "MastCell", shape = "Bd")
+p_jacc + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 20))
+
+
+## BRAY
+
+bray_xk <- phyloseq::distance(xk12, "bray")
+bray.ord <- ordinate(xk12, method = "PCoA", bray_xk)
+
+## Look at our three levels we made earlier, species type
+p_bray <- plot_ordination(xk12, bray.ord, color = "TrmtTimePoint", shape = "Bd")
+p_bray <- plot_ordination(xk12, bray.ord, color = "MastCell", shape = "Bd")
+p_bray + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 16))+ stat_ellipse(aes(group=TrmtTimePoint), linetype = 5, level = 0.8)
+
+
+### STATS
+bray_adonis1 <- adonis2(bray_xk ~ TrmtTimePoint, data = df12)
+bray_adonis1 <- adonis2(bray_xk ~ MastCell*Bd, data = df12)
+bray_adonis1
+
+
+
+
+## Need to think about this, a lot of pairwise differences
+pairwise.adonis(bray_xk, df12$TrmtTimePoint)
+pairwise.adonis(bray_xk, df12$MastCell)
+pairwise.adonis(bray_xk, df12$Bd)
+
+
+
+
+```
+
+
+### Day 21 only
+
+```{r alpha beta D21}
+
+
+xk21 <- subset_samples(xk7, TimePoint == "21d")
+df21 <- as(sample_data(xk21), "data.frame")
+
+df21$Treatment <- as.factor(df21$Treatment)
+df21$TimePoint <- as.factor(df21$TimePoint)
+
+df21$TrmtTimePoint <- as.factor(df21$TrmtTimePoint)
+
+df21$Bd <- as.factor(df21$Bd)
+
+## Need this for beta diversity only
+xk21A <- subset_samples(xk7Anti, TimePoint == "21d")
+df21A <- as(sample_data(xk21A), "data.frame")
+
+xk21A <- filter_taxa(xk21A, function(x) sum(x) !=0, TRUE) #11,344 taxa
+
+xk21A
+
+
+## looks normal after  log10
+hist(log10(df21$S.obs.x))
+hist(log10(df21$S.obs.anti+1))
+hist(log10(df21$AntiBdRA+1))
+
+## p value is below 0.05, so data is not normally distributed
+shapiro.test(log10(df21$S.obs.x)) #p=0.006326
+shapiro.test(log10(df21$S.obs.anti+1)) #p=0.2097
+shapiro.test(log10(df21$AntiBdRA+1)) #p=0.0004698
+
+
+library(car)
+## testing for homogeneity of variance
+## p value is above 0.05, so data similar variances
+leveneTest(log10(df21$S.obs.x)~df21$TrmtTimePoint)
+leveneTest(log10(df21$S.obs.anti+1)~df21$TrmtTimePoint)
+leveneTest(log10(df21$AntiBdRA)~df21$TrmtTimePoint)
+
+str(df21$TrmtTimePoint)
+
+
+## OVerall species richness, borderline
+## good for ANOVA
+modeAlpha21 <- aov(log10(S.obs.x)~TrmtTimePoint, data=df21)
+modeAlpha21 <- aov(log10(S.obs.x)~MastCell*Bd, data=df21)
+summary(modeAlpha21)
+
+levels(df21$TrmtTimePoint)
+
+ggplot(data = df21, aes(x=Treatment, y=S.obs.x))+geom_boxplot()+theme_bw()+theme_classic()+
+  theme(text = element_text(size = 18)) + ylab("Bacterial ASV richness") + xlab("")+ theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 18))
+
+### Anti-Bd species richness, not significant
+modeAlpha21ab <- aov(log10(S.obs.anti+1)~TrmtTimePoint, data=df21)
+modeAlpha21ab <- aov(log10(S.obs.anti+1)~MastCell*Bd, data=df21)
+summary(modeAlpha21ab)
+
+ggplot(data = df21, aes(x=Treatment, y=S.obs.anti))+geom_boxplot()+theme_bw()+theme_classic()+
+  theme(text = element_text(size = 20)) + ylab("Bd-inhibitory bacterial richness") + xlab("")+ theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+## not different
+# TukeyHSD(modeAlpha21ab)
+
+
+## Relative abundance anti-Bd
+modeAlpha21abr <- aov(log10(AntiBdRA)~TrmtTimePoint, data=df21)
+modeAlpha21abr <- aov(log10(AntiBdRA)~MastCell*Bd, data=df21)
+summary(modeAlpha21abr)
+
+## not different
+#TukeyHSD(modeAlpha21abr)
+
+ggplot(data = df21, aes(x=Treatment, y=AntiBdRA))+geom_boxplot()+theme_bw()+theme_classic()+
+  theme(text = element_text(size = 17)) + ylab("Bd-inhibitory ASV relative abundance") + xlab("")+ theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 18))
+
+
+
+
+otu21A <- t(as(otu_table(xk21A), "matrix"))
+
+antiData21 <- merge(otu21A, df21A, by = "row.names")
+
+##25 anti-Bd bacterial OTUs
+OTUs_21D <- data.frame(antiData21[,2:25], row.names = antiData21[,1], Treatment = antiData21[,29])
+OTUs_21D
+
+library(reshape)
+d21 <- melt(OTUs_21D, id.vars = "Treatment")
+
+d21$Treatment <- factor(d21$Treatment, levels = c("Control", "MastCell", "Control+Bd", "MastCell+Bd"))
+
+
+
+# Separate plots
+ggplot(d21, aes(Treatment,log10(value+1))) + 
+  geom_boxplot() + ylab("normailzed sequence count") +
+  facet_wrap(~variable, scales = "free")
+
+
+OTUs_D21 <- data.frame(antiData21[,2:25], row.names = antiData21[,1], Treatment = antiData21[,29], MastCell = antiData21[,33], Bd = antiData21[,32])
+
+#Bd effect, not mast cell effect
+asv21 <- aov(log(x = ASV21+1) ~ Treatment, data = OTUs_D21)
+asv21 <- aov(log(ASV21+1) ~ MastCell*Bd, data = OTUs_D21)
+summary(asv21)
+TukeyHSD(asv21)
+
+summary(aov(log(ASV37+1) ~ Treatment, data = OTUs_D21)) #not sig
+summary(aov(log(ASV41+1) ~ Treatment, data = OTUs_D21))
+summary(aov(log(ASV48+1) ~ Treatment, data = OTUs_D21))
+summary(aov(log(ASV55+1) ~ Treatment, data = OTUs_D21)) #not sig
+summary(aov(log(ASV72+1) ~ Treatment, data = OTUs_D21))
+summary(aov(log(ASV99+1) ~ Treatment, data = OTUs_D21))#not sig
+summary(aov(log(ASV135+1) ~ Treatment, data = OTUs_D21)) #not sig
+summary(aov(log(ASV179+1) ~ Treatment, data = OTUs_D21))
+summary(aov(log(ASV299+1) ~ Treatment, data = OTUs_D21)) #not sig
+summary(aov(log(ASV319+1) ~ Treatment, data = OTUs_D21)) #not sig
+summary(aov(log(ASV356+1) ~ Treatment, data = OTUs_D21)) #not sig
+summary(aov(log(ASV425+1) ~ Treatment, data = OTUs_D21)) #not sig
+summary(aov(log(ASV495+1) ~ Treatment, data = OTUs_D21))
+summary(aov(log(ASV513+1) ~ Treatment, data = OTUs_D21)) #not sig
+summary(aov(log(ASV516+1) ~ Treatment, data = OTUs_D21)) #not sig
+summary(aov(log(ASV976+1) ~ Treatment, data = OTUs_D21)) #not sig
+
+
+#Bd and mast cell effect
+asv41 <- aov(log(ASV41+1) ~ Treatment, data = OTUs_D21)
+asv41 <- aov(log(ASV41+1) ~ MastCell*Bd, data = OTUs_D21)
+summary(asv41)
+TukeyHSD(asv41)
+
+#Mastcell and bd effect
+asv48 <- aov(log(ASV48+1) ~ Treatment, data = OTUs_D21)
+asv48 <- aov(log(ASV48+1) ~ MastCell*Bd, data = OTUs_D21)
+summary(asv48)
+TukeyHSD(asv48)
+
+
+#Bd effect
+asv72 <- aov(log(ASV72+1) ~ Treatment, data = OTUs_D21)
+asv72 <- aov(log(ASV72+1) ~ MastCell*Bd, data = OTUs_D21)
+summary(asv72)
+TukeyHSD(asv72)
+
+
+#Bd effect
+asv495 <- aov(log(ASV495+1) ~ Treatment, data = OTUs_D21)
+asv495 <- aov(log(ASV495+1) ~ MastCell*Bd, data = OTUs_D21)
+summary(asv495)
+TukeyHSD(asv495)
+
+asv99 <- aov(log(ASV99+1) ~ Treatment, data = OTUs_D21)
+asv99 <- aov(log(ASV99+1) ~ MastCell*Bd, data = OTUs_D21)
+summary(asv99)
+TukeyHSD(asv99)
+
+asv179 <- aov(log(ASV179+1) ~ Treatment, data = OTUs_D21)
+asv179 <- aov(log(ASV179+1) ~ MastCell*Bd, data = OTUs_D21)
+summary(asv179)
+TukeyHSD(asv179)
+
+##
+
+str(OTUs_D21)
+
+plot(log(ASV21+1) ~ as.factor(Treatment), data = OTUs_D21)
+plot(log(ASV41+1) ~ as.factor(Treatment), data = OTUs_D21)
+plot(log(ASV48+1) ~ as.factor(Treatment), data = OTUs_D21)
+plot(log(ASV72+1) ~ as.factor(Treatment), data = OTUs_D21)
+plot(log(ASV99+1) ~ as.factor(Treatment), data = OTUs_D21)
+plot(log(ASV179+1) ~ as.factor(Treatment), data = OTUs_D21)
+plot(log(ASV495+1) ~ as.factor(Treatment), data = OTUs_D21)
+
+
+#STATS
+
+jacc_xk <- phyloseq::distance(xk21, "jaccard", binary = T)
+jacc.ord <- ordinate(xk21, method = "PCoA", jacc_xk)
+
+p_jacc <- plot_ordination(xk21, jacc.ord, color = "TrmtTimePoint", shape = "Bd")
+p_jacc + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 18)) + stat_ellipse(aes(group=TrmtTimePoint), linetype = 5, level = 0.8)
+
+
+### STATS
+library(vegan)
+jacc_adonis1 <- adonis2(jacc_xk ~ TrmtTimePoint, data = df21)
+jacc_adonis1 <- adonis2(jacc_xk ~ MastCell*Bd, data = df21)
+jacc_adonis1
+
+
+library(pairwiseAdonis)
+
+## The effect of mast cells depends on Bd infection status
+pairwise.adonis(jacc_xk, df21$TrmtTimePoint)
+pairwise.adonis(jacc_xk, df21$MastCell)
+pairwise.adonis(jacc_xk, df21$Bd)
+
+
+p_jacc <- plot_ordination(xk21, jacc.ord, color = "MastCell", shape = "Bd")
+p_jacc + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 20))
+
+
+## BRAY
+
+bray_xk <- phyloseq::distance(xk21, "bray")
+bray.ord <- ordinate(xk21, method = "PCoA", bray_xk)
+
+## Look at our three levels we made earlier, species type
+p_bray <- plot_ordination(xk21, bray.ord, color = "TrmtTimePoint", shape = "Bd")
+p_bray <- plot_ordination(xk21, bray.ord, color = "MastCell", shape = "Bd")
+
+p_bray + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 18)) + stat_ellipse(aes(group=TrmtTimePoint), linetype = 5, level = 0.8)
+
+
+### STATS
+set.seed(104)
+bray_adonis1 <- adonis2(bray_xk ~ TrmtTimePoint, data = df21)
+bray_adonis1 <- adonis2(bray_xk ~ MastCell*Bd, data = df21)
+bray_adonis1
+
+
+
+
+## Need to think about this, a lot of pairwise differences
+pairwise.adonis(bray_xk, df21$TrmtTimePoint)
+pairwise.adonis(bray_xk, df21$MastCell)
+pairwise.adonis(bray_xk, df21$Bd)
+
+#heatmap stuff
+ph_sub <- plot_heatmap(xk21A, distance = "euclidean", sample.label="Treatment", 
+                       taxa.label = "ASV", high = "red", low = "yellow", 
+                       na.value = "darkgray", sample.order = "Treatment", taxa.order = "ASV")
+
+ph_sub + facet_grid(~Treatment, scales = "free_x")
+
+
+
+
+####### OLD CODE BELOW: REDID CODE TO MATCH DAY 10 ANALYSIS #####
+
+
+otu21A <- t(as(otu_table(xk21A), "matrix"))
+
+antiData <- merge(otu21A, df21A, by = "row.names")
+
+## 20 anti-Bd bacterial OTUs
+OTUs_D <- data.frame(antiData[,2:20], row.names = antiData[,1], Treatment = antiData[,24])
+
+
+OTUs_D$Treatment <- factor(OTUs_D$Treatment, levels = c("Control", "MastCell+", "Bd+", "MastCell+Bd+"))
+
+
+library(reshape)
+d <- melt(OTUs_D, id.vars = "Treatment")
+d$Treatment <- factor(d$Treatment, levels = c("Control", "MastCell+", "Bd+", "MastCell+Bd+"))
+
+
+# Separate plots
+ggplot(d, aes(Treatment,log10(value+1))) + 
+  geom_boxplot() + ylab("normailzed sequence count") +
+  facet_wrap(~variable, scales = "free")
+
+OTUs_D <- data.frame(antiData[,2:20], row.names = antiData[,1], Treatment = antiData[,24], MastCell = antiData[,28], Bd = antiData[,27])
+
+
+
+summary(aov(log(ASV2+1) ~ MastCell*Bd, data = OTUs_D))
+asv76 <- aov(log(ASV76+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv76)
+TukeyHSD(asv76)
+
+##28 sig
+summary(aov(log(ASV28+1) ~ MastCell*Bd, data = OTUs_D))
+
+TukeyHSD(aov(log(ASV28+1) ~ MastCell*Bd, data = OTUs_D))
+
+summary(aov(log(ASV51+1) ~ MastCell*Bd, data = OTUs_D))
+
+summary(aov(log(ASV105+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV113+1) ~ MastCell*Bd, data = OTUs_D))
+asv136 <- aov(log(ASV136+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv136)
+summary(aov(log(ASV150+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV164+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV171+1) ~ MastCell*Bd, data = OTUs_D))
+
+##183 sig
+summary(aov(log(ASV183+1) ~ MastCell*Bd, data = OTUs_D))
+TukeyHSD(aov(log(ASV183+1) ~ MastCell*Bd, data = OTUs_D))
+
+summary(aov(log(ASV196+1) ~ MastCell*Bd, data = OTUs_D))
+
+summary(aov(log(ASV238+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV273+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV329+1) ~ MastCell*Bd, data = OTUs_D))
+asv346 <- aov(log(ASV346+1) ~ MastCell*Bd, data = OTUs_D)
+summary(asv346)
+
+summary(aov(log(ASV409+1) ~ MastCell*Bd, data = OTUs_D))
+
+##sig
+summary(aov(log(ASV550+1) ~ MastCell*Bd, data = OTUs_D))
+summary(aov(log(ASV587+1) ~ MastCell*Bd, data = OTUs_D))
+
+
+str(OTUs_D)
+#plot(log(ASV62+1) ~ as.factor(Treatment), data = OTUs_D)
+
+#plot(log(ASV53+1) ~ as.factor(Treatment), data = OTUs_D)
+
+plot(log(ASV150+1) ~ as.factor(Treatment), data = OTUs_D)
+
+
+
+
+
+## Not different
+# TukeyHSD(modeAlpha21)
+
+
+
+### BETA ###
+
+jacc_21 <- phyloseq::distance(xk21, "jaccard", binary = T)
+jacc.ord21 <- ordinate(xk21, method = "PCoA", jacc_21)
+
+## Look at our three levels we made earlier, species type
+p_jacc21 <- plot_ordination(xk21, jacc.ord21, color = "TrmtTimePoint", shape = "Bd")
+p_jacc21 + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 20)) #+ stat_ellipse(aes(group = TrmtTimePoint)) 
+
+
+### STATS
+jacc_adonis21 <- adonis(jacc_21 ~ TrmtTimePoint, data = df21)
+jacc_adonis21
+
+jacc_adonis21 <- adonis(jacc_21 ~ MastCell*Bd, data = df21)
+jacc_adonis21
+
+
+## Half different, 
+pairwise.adonis(jacc_21, df21$TrmtTimePoint)
+pairwise.adonis(jacc_21, df21$Trmt2)
+pairwise.adonis(jacc_21, df21$Bd)
+
+## What about anit-Bd bac
+
+xk21A
+
+jacc_21A <- phyloseq::distance(xk21A, "jaccard", binary = T)
+jacc.ord21A <- ordinate(xk21A, method = "PCoA", jacc_21A)
+
+## Look at our three levels we made earlier, species type
+p_jacc21A <- plot_ordination(xk21A, jacc.ord21A, color = "TrmtTimePoint", shape = "Bd")
+p_jacc21A + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 20)) + stat_ellipse(aes(group = TrmtTimePoint)) 
+
+
+### STATS
+jacc_adonis21A <- adonis(jacc_21A ~ TrmtTimePoint, data = df21A)
+jacc_adonis21A
+
+
+## Everyone different, except Mast cells 21s vs Control+Bd and Control
+pairwise.adonis(jacc_21A, df21A$TrmtTimePoint)
+
+
+## BRAY
+
+bray_21 <- phyloseq::distance(xk21, "bray")
+bray.ord21 <- ordinate(xk21, method = "PCoA", bray_21)
+
+## Look at our three levels we made earlier, species type
+p_bray21 <- plot_ordination(xk21, bray.ord21, color = "TrmtTimePoint", shape = "Bd")
+p_bray21 + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 20))#+ stat_ellipse(aes(group = TrmtTimePoint)) 
+
+
+### STATS
+bray_adonis21 <- adonis(bray_21 ~ TrmtTimePoint, data = df21)
+bray_adonis21 <- adonis(bray_21 ~ MastCell*Bd, data = df21)
+bray_adonis21
+
+
+## Everyone is different with Bray-Curtis
+pairwise.adonis(bray_21, df21$TrmtTimePoint)
+
+
+bray_21A <- phyloseq::distance(xk21A, "bray")
+bray.ord21A <- ordinate(xk21A, method = "PCoA", bray_21A)
+
+## Look at our three levels we made earlier, species type
+p_bray21A <- plot_ordination(xk21A, bray.ord21A, color = "TrmtTimePoint", shape = "Bd")
+p_bray21A + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 20))+ stat_ellipse(aes(group = TrmtTimePoint)) 
+
+
+### STATS
+bray_adonis21A <- adonis(bray_21A ~ TrmtTimePoint, data = df21A)
+bray_adonis21A
+
+
+## Everyone is different with Bray-Curtis
+pairwise.adonis(bray_21A, df21A$TrmtTimePoint)
+
+
+
+
+### BETA AntiBd###
+
+jacc_21 <- phyloseq::distance(xk21A, "jaccard", binary = T)
+jacc.ord21 <- ordinate(xk21A, method = "PCoA", jacc_21)
+
+## Look at our three levels we made earlier, species type
+p_jacc21 <- plot_ordination(xk21A, jacc.ord21, color = "TrmtTimePoint", shape = "Bd")
+p_jacc21 + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 20))
+
+
+### STATS
+jacc_adonis21 <- adonis(jacc_21 ~ TrmtTimePoint, data = df21A)
+jacc_adonis21
+
+
+## Everyone different, except Mast cells 21s vs Control+Bd and Control
+pairwise.adonis(jacc_21, df21A$TrmtTimePoint)
+
+
+## BRAY
+
+bray_21 <- phyloseq::distance(xk21A, "bray")
+bray.ord21 <- ordinate(xk21A, method = "PCoA", bray_21)
+
+## Look at our three levels we made earlier, species type
+p_bray21 <- plot_ordination(xk21A, bray.ord21, color = "TrmtTimePoint", shape = "Bd")
+p_bray21 + geom_point(size = 4)  +theme_bw() +theme_classic()+ 
+  theme(text = element_text(size = 20))
+
+
+### STATS
+bray_adonis21 <- adonis(bray_21 ~ TrmtTimePoint, data = df21A)
+bray_adonis21
+
+
+## Everyone is different with Bray-Curtis
+pairwise.adonis(bray_21, df21A$TrmtTimePoint)
+
+
+
+```
+
+
