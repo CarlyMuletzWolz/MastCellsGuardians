@@ -8,3 +8,5 @@ Pre-processing R file to remove contaminants with decontam, examine positive con
 Final analysis R file with the main analyses and the files associated with them. 
 
 Two metadata files as an initial one contains all the samples and controls and a final one is outputted with just samples and addition of alpha diversity estimates, estimates on Bd-inhibitory bacteria, etc
+
+Sequence data here: https://www.ncbi.nlm.nih.gov/bioproject/PRJNA1061169
